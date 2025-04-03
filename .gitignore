@@ -1,0 +1,34 @@
+# Node modules
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# dotenv
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Editor junk
+.vscode/
+.idea/
+*.swp
+
+# Coverage / output
+coverage/
+dist/
+build/
+
+# Mac system files
+*.DS_Store
+
+# Optional: test snapshots
+__snapshots__/
