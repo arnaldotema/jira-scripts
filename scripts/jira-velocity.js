@@ -14,7 +14,7 @@ const MAX_HOURS = 24 * 7 * 3;
 function buildJQL() {
   return `
     project = "${JIRA_PROJECT_KEY}" AND
-    resolved >= 2025-01-01
+    resolved >= 2025-04-01
     ORDER BY created DESC
   `.replace(/\s+/g, ' ').trim();
 }
@@ -79,6 +79,10 @@ function extractStoryPoints(issue) {
   return issue.fields?.customfield_10124 || null;
 }
 
+function getAssignee(issue) {
+  return issue.fields.assignee?.displayName || 'Unassigned';
+}
+
 function computeResults(issues) {
   const rows = [];
 
@@ -86,6 +90,7 @@ function computeResults(issues) {
     const sp = extractStoryPoints(issue);
     const inProgressDate = getFirstInProgressDate(issue.changelog);
     const resolvedDate = issue.fields.resolutiondate;
+    const assignee = getAssignee(issue);
 
     if (!sp || !inProgressDate || !resolvedDate) continue;
 
@@ -96,6 +101,7 @@ function computeResults(issues) {
       key: issue.key,
       link: `${JIRA_BASE_URL}/browse/${issue.key}`,
       storyPoints: sp,
+      assignee: assignee,
       inProgress: formatISO(parseISO(inProgressDate)),
       resolved: formatISO(parseISO(resolvedDate)),
       hours: deltaHours
@@ -105,10 +111,13 @@ function computeResults(issues) {
   return rows;
 }
 
-function computeAveragePerStoryPoint(rows) {
+function computeAveragePerStoryPoint(rows, assigneeFilter = null) {
   const bucket = {};
+  const filteredRows = assigneeFilter 
+    ? rows.filter(row => row.assignee === assigneeFilter)
+    : rows;
 
-  for (const row of rows) {
+  for (const row of filteredRows) {
     const sp = row.storyPoints;
     if (!bucket[sp]) bucket[sp] = [];
     bucket[sp].push(row.hours);
@@ -123,6 +132,7 @@ function computeAveragePerStoryPoint(rows) {
       avgHours: +mean.toFixed(2)
     };
   }
+  
 
   return avg;
 }
@@ -132,11 +142,20 @@ function computeAveragePerStoryPoint(rows) {
     console.log('Fetching Jira issues...');
     const issues = await getAllIssues();
     const results = computeResults(issues);
-    console.table(results, ['key', 'storyPoints', 'inProgress', 'resolved', 'hours']);
+    console.table(results, ['key', 'storyPoints', 'assignee', 'inProgress', 'resolved', 'hours']);
     
+    // Overall averages
     const avgPerSP = computeAveragePerStoryPoint(results);
     console.log('Avg hours per Story Point:');
     console.table(avgPerSP);
+
+    // Per-assignee averages
+    const assignees = [...new Set(results.map(r => r.assignee))];
+    for (const assignee of assignees) {
+      const assigneeAvg = computeAveragePerStoryPoint(results, assignee);
+      console.log(`\nAvg hours per Story Point (${assignee}):`);
+      console.table(assigneeAvg);
+    }
 
   } catch (err) {
     console.error('[FATAL] Script failed.');
