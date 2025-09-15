@@ -10,7 +10,45 @@ const JIRA_API_TOKEN = process.env.JIRA_API_TOKEN;
 const JQL_QUERY = encodeURIComponent('project = DSH AND issuetype in (Ticket, Bug) AND created >= "2024-12-01" ORDER BY created DESC');
 
 // Add this function to convert ADF to plain text
-function convertADFToPlainText(adf) {
+function convertADFToPlainTextAllInOneLine(adf) {
+    if (!adf || !adf.content) return '';
+
+    function extractText(node) {
+        if (!node) return '';
+        
+        if (node.text) return node.text;
+        
+        if (node.content) {
+            let text = node.content.map(extractText).join('');
+            
+            // Handle special cases
+            switch (node.type) {
+                case 'paragraph':
+                    text += ' ';
+                    break;
+                case 'bulletList':
+                    // Don't add extra newlines for lists as listItems will handle it
+                    break;
+                case 'listItem':
+                    text = '• ' + text + ' ';
+                    break;
+                case 'hardBreak':
+                    text = ' ';
+                    break;
+            }
+            
+            return text;
+        }
+        
+        return '';
+    }
+
+    const plainText = adf.content.map(extractText).join('');
+    // Clean up multiple newlines and trim
+    return plainText.replace(/\n\n\n+/g, '\n\n').trim();
+}
+
+function convertADFToPlainTextWithNewlines(adf) {
     if (!adf || !adf.content) return '';
 
     function extractText(node) {
@@ -48,6 +86,7 @@ function convertADFToPlainText(adf) {
     return plainText.replace(/\n\n\n+/g, '\n\n').trim();
 }
 
+
 async function fetchAllJiraTickets() {
     let allTickets = [];
     let startAt = 0;
@@ -82,7 +121,7 @@ async function fetchAllJiraTickets() {
                 status: issue.fields.status.name,
                 resolution: issue.fields.resolution ? issue.fields.resolution.name : 'Unresolved',
                 updated: issue.fields.updated,
-                description: convertADFToPlainText(issue.fields.description)
+                description: convertADFToPlainTextAllInOneLine(issue.fields.description)
             }));
 
             allTickets = allTickets.concat(tickets);
