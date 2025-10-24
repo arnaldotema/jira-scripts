@@ -1,0 +1,9 @@
+{
+  "name": "pr-review-metrics",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "dotenv": "^16.0.3",
+    "table": "^6.9.0"
+  }
+}
