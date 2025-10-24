@@ -1,0 +1,23 @@
+company_name,industry,country,domain
+Apple Inc,Technology,USA,apple.com
+Microsoft Corporation,Technology,USA,microsoft.com
+Google LLC,Technology,USA,google.com
+Amazon.com Inc,E-commerce,USA,amazon.com
+Meta Platforms Inc,Social Media,USA,meta.com
+Tesla Inc,Automotive,USA,tesla.com
+Netflix Inc,Entertainment,USA,netflix.com
+Adobe Inc,Software,USA,adobe.com
+Salesforce Inc,Software,USA,salesforce.com
+Oracle Corporation,Software,USA,oracle.com
+IBM,Technology,USA,ibm.com
+Intel Corporation,Semiconductors,USA,intel.com
+Cisco Systems,Networking,USA,cisco.com
+PayPal Holdings,Financial Services,USA,paypal.com
+Spotify,Music Streaming,Sweden,spotify.com
+Airbnb Inc,Hospitality,USA,airbnb.com
+Uber Technologies,Transportation,USA,uber.com
+Twitter Inc,Social Media,USA,twitter.com
+Zoom Video Communications,Software,USA,zoom.us
+Shopify Inc,E-commerce,Canada,shopify.com
+Atlassian Corporation,Software,Australia,atlassian.com
+Stripe Inc,Financial Services,USA,stripe.com
