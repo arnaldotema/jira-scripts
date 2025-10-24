@@ -1,5 +1,8 @@
 const axios = require('axios');
 const { parseISO, formatISO } = require('date-fns');
+const yaml = require('js-yaml');
+const fs = require('fs');
+const path = require('path');
 
 // --- Config ---
 require('dotenv').config();
@@ -7,6 +10,9 @@ require('dotenv').config();
 const JIRA_BASE_URL = process.env.JIRA_BASE_URL;
 const JIRA_EMAIL = process.env.JIRA_EMAIL;
 const JIRA_API_TOKEN = process.env.JIRA_API_TOKEN;
+
+// BambooHR Config
+const BAMBOOHR_API_KEY = process.env.BAMBOOHR_API_KEY;
 
 // Board IDs for velocity calculation
 const SCRUM_BOARDS = {
@@ -19,6 +25,161 @@ const TEAM_SIZES = {
   'Dashboard': 6,
   'Back Office + Internal Tools': 4
 };
+
+// --- Config Loading Functions ---
+
+function loadConfig() {
+  try {
+    const configPath = path.join(__dirname, '..', 'config', 'teams.yaml');
+    const fileContents = fs.readFileSync(configPath, 'utf8');
+    return yaml.load(fileContents);
+  } catch (error) {
+    console.error('[ERROR] Failed to load config file:', error.message);
+    return null;
+  }
+}
+
+// --- BambooHR Functions ---
+
+async function fetchTimeOffData(subdomain, startDate, endDate) {
+  if (!BAMBOOHR_API_KEY) {
+    console.warn('[WARN] BambooHR API key not found. Skipping PTO calculations.');
+    return [];
+  }
+
+  try {
+    // Convert DD-MM-YYYY to YYYY-MM-DD format for BambooHR API
+    const formatDateForAPI = (dateStr) => {
+      const [day, month, year] = dateStr.split('-');
+      return `${year}-${month}-${day}`;
+    };
+
+    const formattedStartDate = formatDateForAPI(startDate);
+    const formattedEndDate = formatDateForAPI(endDate);
+
+    // Try the time off requests endpoint first
+    const url = `https://api.bamboohr.com/api/gateway.php/${subdomain}/v1/time_off/requests`;
+    
+    const response = await axios.get(url, {
+      auth: {
+        username: BAMBOOHR_API_KEY,
+        password: 'x'
+      },
+      params: {
+        start: formattedStartDate,
+        end: formattedEndDate,
+        status: 'approved'
+      },
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json'
+      }
+    });
+
+    return response.data || [];
+  } catch (error) {
+    // Try alternative endpoint if the first one fails
+    try {
+      const formatDateForAPI = (dateStr) => {
+        const [day, month, year] = dateStr.split('-');
+        return `${year}-${month}-${day}`;
+      };
+
+      const formattedStartDate = formatDateForAPI(startDate);
+      const formattedEndDate = formatDateForAPI(endDate);
+
+      // Alternative endpoint - time off balances/requests
+      const url = `https://api.bamboohr.com/api/gateway.php/${subdomain}/v1/time_off/requests?action=view&type=all`;
+      
+      const response = await axios.get(url, {
+        auth: {
+          username: BAMBOOHR_API_KEY,
+          password: 'x'
+        },
+        headers: {
+          'Accept': 'application/json'
+        }
+      });
+
+      // Filter results by date range if we get data
+      const allRequests = response.data || [];
+      if (Array.isArray(allRequests)) {
+        return allRequests.filter(request => {
+          const requestStart = new Date(request.start || request.startDate);
+          const requestEnd = new Date(request.end || request.endDate);
+          const rangeStart = new Date(formattedStartDate);
+          const rangeEnd = new Date(formattedEndDate);
+          
+          return requestStart <= rangeEnd && requestEnd >= rangeStart;
+        });
+      }
+      
+      return [];
+    } catch (secondError) {
+      console.warn('[WARN] Failed to fetch BambooHR data:', error.response?.data || error.message);
+      console.warn('[DEBUG] Also tried alternative endpoint:', secondError.response?.data || secondError.message);
+      return [];
+    }
+  }
+}
+
+function getWorkingDays(startDate, endDate) {
+  const start = new Date(startDate);
+  const end = new Date(endDate);
+  let workingDays = 0;
+  
+  let currentDate = new Date(start);
+  while (currentDate <= end) {
+    const dayOfWeek = currentDate.getDay();
+    // 0 = Sunday, 6 = Saturday
+    if (dayOfWeek !== 0 && dayOfWeek !== 6) {
+      workingDays++;
+    }
+    currentDate.setDate(currentDate.getDate() + 1);
+  }
+  
+  return workingDays;
+}
+
+function calculatePTOImpact(timeOffData, teamMembers, quarterStart, quarterEnd) {
+  const totalWorkingDays = getWorkingDays(quarterStart, quarterEnd);
+  let totalPTODays = 0;
+
+  // Calculate total PTO days for all team members during the quarter
+  for (const member of teamMembers) {
+    const memberPTO = timeOffData.filter(request => {
+      // Match by employee name from BambooHR data structure
+      const employeeName = request.name || request.employee?.displayName || request.employee?.firstName + ' ' + request.employee?.lastName;
+      return employeeName === member;
+    });
+
+    for (const pto of memberPTO) {
+      // Use the correct date fields from BambooHR API
+      const ptoStartDate = new Date(pto.start);
+      const ptoEndDate = new Date(pto.end);
+      const quarterStartDate = new Date(quarterStart);
+      const quarterEndDate = new Date(quarterEnd);
+      
+      // Calculate overlap between PTO period and quarter period
+      const overlapStart = new Date(Math.max(ptoStartDate.getTime(), quarterStartDate.getTime()));
+      const overlapEnd = new Date(Math.min(ptoEndDate.getTime(), quarterEndDate.getTime()));
+      
+      if (overlapStart <= overlapEnd) {
+        const ptoDays = getWorkingDays(overlapStart, overlapEnd);
+        totalPTODays += ptoDays;
+      }
+    }
+  }
+
+  // Calculate capacity reduction as percentage
+  const capacityReduction = totalPTODays / (teamMembers.length * totalWorkingDays);
+  return Math.min(capacityReduction, 1); // Cap at 100% reduction
+}
+
+function parseDateDDMMYYYY(dateStr) {
+  const [day, month, year] = dateStr.split('-');
+  return new Date(year, month - 1, day); // month is 0-indexed
+}
 
 // Create auth header
 const getAuthHeader = () => ({
@@ -316,7 +477,7 @@ async function getEpicChildren(epicKey) {
       const url = `${JIRA_BASE_URL}/rest/api/3/search/jql`;
       const response = await axios.post(url, {
         jql,
-        fields: ['customfield_10124', 'summary', 'issuetype'],
+        fields: ['customfield_10124', 'summary', 'issuetype', 'resolved'],
         maxResults: 100
       }, {
         headers: {
@@ -326,7 +487,18 @@ async function getEpicChildren(epicKey) {
       });
       
       if (response.data.issues && response.data.issues.length > 0) {
-        return response.data.issues;
+        // Filter out resolved items - only include items where 'resolved' is empty/null
+        const allIssues = response.data.issues;
+        const unresolvedIssues = allIssues.filter(issue => 
+          !issue.fields.resolved // resolved field is null/empty for unresolved items
+        );
+        
+        const resolvedCount = allIssues.length - unresolvedIssues.length;
+        if (resolvedCount > 0) {
+          console.log(`[INFO] Epic ${epicKey}: Found ${allIssues.length} child items, excluding ${resolvedCount} resolved items (counting only ${unresolvedIssues.length} unresolved)`);
+        }
+        
+        return unresolvedIssues;
       }
     } catch (error) {
       // Try next JQL pattern
@@ -339,14 +511,25 @@ async function getEpicChildren(epicKey) {
     const url = `${JIRA_BASE_URL}/rest/agile/1.0/epic/${epicKey}/issue`;
     const response = await axios.get(url, {
       params: {
-        fields: 'customfield_10124,summary,issuetype',
+        fields: 'customfield_10124,summary,issuetype,resolved',
         maxResults: 100
       },
       headers: getAuthHeader()
     });
     
     if (response.data.issues && response.data.issues.length > 0) {
-      return response.data.issues;
+      // Filter out resolved items - only include items where 'resolved' is empty/null
+      const allIssues = response.data.issues;
+      const unresolvedIssues = allIssues.filter(issue => 
+        !issue.fields.resolved // resolved field is null/empty for unresolved items
+      );
+      
+      const resolvedCount = allIssues.length - unresolvedIssues.length;
+      if (resolvedCount > 0) {
+        console.log(`[INFO] Epic ${epicKey}: Found ${allIssues.length} child items, excluding ${resolvedCount} resolved items (counting only ${unresolvedIssues.length} unresolved)`);
+      }
+      
+      return unresolvedIssues;
     }
   } catch (error) {
     // Ignore error, return empty array
@@ -546,9 +729,9 @@ function displayCustomTable(results) {
   // Header with styling
   // Header - new order: Team, Committed, Roadmap, IdeaKey, Summary, Linked, SP, Team Sprints, Person Sprints
   console.log('');
-  console.log(colors.bright + colors.cyan + '┌─' + '─'.repeat(maxTeamWidth) + '─┬─' + '─'.repeat(maxCommittedWidth) + '─┬─' + '─'.repeat(maxRoadmapWidth) + '─┬─' + '─'.repeat(maxKeyWidth) + '─┬─' + '─'.repeat(maxSummaryWidth) + '─┬─────────┬──────┬─────────────┬──────────────┐' + colors.reset);
+  console.log(colors.bright + colors.cyan + '┌─' + '─'.repeat(maxTeamWidth) + '─┬─' + '─'.repeat(maxCommittedWidth) + '─┬─' + '─'.repeat(maxRoadmapWidth) + '─┬─' + '─'.repeat(maxKeyWidth) + '─┬─' + '─'.repeat(maxSummaryWidth) + '─┬─────────┬──────┬─────────────┬───────────────┐' + colors.reset);
   console.log(colors.bright + colors.cyan + '│ ' + colors.white + pad('Team', maxTeamWidth) + colors.cyan + ' │ ' + colors.white + pad('Committed', maxCommittedWidth) + colors.cyan + ' │ ' + colors.white + pad('Roadmap', maxRoadmapWidth) + colors.cyan + ' │ ' + colors.white + pad('IdeaKey', maxKeyWidth) + colors.cyan + ' │ ' + colors.white + pad('Summary', maxSummaryWidth) + colors.cyan + ' │ ' + colors.white + 'Linked  ' + colors.cyan + '│ ' + colors.white + 'SP   ' + colors.cyan + '│ ' + colors.white + 'Team Sprints' + colors.cyan + '│ ' + colors.white + 'Person Sprints' + colors.cyan + '│' + colors.reset);
-  console.log(colors.bright + colors.cyan + '├─' + '─'.repeat(maxTeamWidth) + '─┼─' + '─'.repeat(maxCommittedWidth) + '─┼─' + '─'.repeat(maxRoadmapWidth) + '─┼─' + '─'.repeat(maxKeyWidth) + '─┼─' + '─'.repeat(maxSummaryWidth) + '─┼─────────┼──────┼─────────────┼──────────────┤' + colors.reset);
+  console.log(colors.bright + colors.cyan + '├─' + '─'.repeat(maxTeamWidth) + '─┼─' + '─'.repeat(maxCommittedWidth) + '─┼─' + '─'.repeat(maxRoadmapWidth) + '─┼─' + '─'.repeat(maxKeyWidth) + '─┼─' + '─'.repeat(maxSummaryWidth) + '─┼─────────┼──────┼─────────────┼───────────────┤' + colors.reset);
   
   // Data rows with colors
   sortedResults.forEach((result, index) => {
@@ -579,7 +762,7 @@ function displayCustomTable(results) {
                 pSprintColor + colors.bright + pad(result.personSprints.toString(), 12) + colors.reset + colors.cyan + ' │' + colors.reset);
   });
   
-  console.log(colors.bright + colors.cyan + '└─' + '─'.repeat(maxTeamWidth) + '─┴─' + '─'.repeat(maxCommittedWidth) + '─┴─' + '─'.repeat(maxRoadmapWidth) + '─┴─' + '─'.repeat(maxKeyWidth) + '─┴─' + '─'.repeat(maxSummaryWidth) + '─┴─────────┴──────┴─────────────┴──────────────┘' + colors.reset);
+  console.log(colors.bright + colors.cyan + '└─' + '─'.repeat(maxTeamWidth) + '─┴─' + '─'.repeat(maxCommittedWidth) + '─┴─' + '─'.repeat(maxRoadmapWidth) + '─┴─' + '─'.repeat(maxKeyWidth) + '─┴─' + '─'.repeat(maxSummaryWidth) + '─┴─────────┴──────┴─────────────┴───────────────┘' + colors.reset);
   
   // Legend
   console.log('');
@@ -612,6 +795,8 @@ async function analyzeIdeas(ideaIds, quarters, teams = ['Dashboard', 'Back Offic
     const ideas = await fetchIdeas(ideaIds, quarters, teams);
 
     const results = [];
+
+    console.log(`\nCalculating results...`);
 
     for (const idea of ideas) {
       const linkedItems = getLinkedItems(idea);
@@ -666,9 +851,9 @@ async function analyzeIdeas(ideaIds, quarters, teams = ['Dashboard', 'Back Offic
 }
 
 /**
- * Display team summary table with enhanced styling
+ * Display team summary table with enhanced styling and PTO-aware capacity
  */
-function displayTeamSummaryTable(teamQuarterSummary) {
+async function displayTeamSummaryTable(teamQuarterSummary, config = null, ptoData = []) {
   const colors = {
     reset: '\x1b[0m',
     bright: '\x1b[1m',
@@ -712,16 +897,31 @@ function displayTeamSummaryTable(teamQuarterSummary) {
     return typeA.localeCompare(typeB);
   });
 
+  // Fetch team velocities
+  const teamVelocities = {};
+  const uniqueTeams = [...new Set(entries.map(([key]) => key.split(' (')[0]))];
+  
+  for (const teamName of uniqueTeams) {
+    try {
+      teamVelocities[teamName] = await getTeamVelocity(teamName);
+    } catch (error) {
+      teamVelocities[teamName] = 'N/A';
+    }
+  }
+
   // Calculate column widths
   const maxTeamWidth = Math.max(20, ...entries.map(([key]) => key.length));
+  const maxVelocityWidth = 8; // Velocity
   const maxIdeasWidth = 5;
   const maxSPWidth = 6;
   const maxTeamSprintsWidth = 12;
-  const maxPersonSprintsWidth = 14;
+  const maxPersonSprintsWidth = 19; // PS
+  const maxPSTargetWidth = 9; // PS Target
+  const maxBufferWidth = 17; // Buffer (goal +20%)
 
   // Helper function to pad text
   const pad = (text, width) => {
-    const visibleLength = text.replace(/\x1b\[[0-9;]*m/g, '').length;
+    const visibleLength = text.replace(/\u001b\]8;;[^\u001b]*\u001b\\|\u001b\]8;;\u001b\\|\x1b\[[0-9;]*m/g, '').length;
     const padding = Math.max(0, width - visibleLength);
     return text + ' '.repeat(padding);
   };
@@ -748,11 +948,24 @@ function displayTeamSummaryTable(teamQuarterSummary) {
     return colors.red;
   };
 
+  // Get person sprints colors (green if <= target, red if > target)
+  const getPersonSprintsColor = (personSprints, target) => {
+    if (personSprints <= target) return colors.green;
+    return colors.red;
+  };
+
+  // Get buffer colors
+  const getBufferColor = (bufferPercent) => {
+    if (bufferPercent >= 20) return colors.green;
+    if (bufferPercent >= 10) return '\x1b[33m'; // orange
+    return colors.red;
+  };
+
   // Header
   console.log('');
-  console.log(colors.bright + colors.cyan + '┌─' + '─'.repeat(maxTeamWidth) + '─┬─' + '─'.repeat(maxIdeasWidth) + '─┬─' + '─'.repeat(maxSPWidth) + '─┬─' + '─'.repeat(maxTeamSprintsWidth) + '─┬─' + '─'.repeat(maxPersonSprintsWidth) + '─┐' + colors.reset);
-  console.log(colors.bright + colors.cyan + '│ ' + colors.white + pad('Team & Quarter', maxTeamWidth) + colors.cyan + ' │ ' + colors.white + pad('Ideas', maxIdeasWidth) + colors.cyan + ' │ ' + colors.white + pad('SP', maxSPWidth) + colors.cyan + ' │ ' + colors.white + pad('Team Sprints', maxTeamSprintsWidth) + colors.cyan + ' │ ' + colors.white + pad('Person Sprints', maxPersonSprintsWidth) + colors.cyan + ' │' + colors.reset);
-  console.log(colors.bright + colors.cyan + '├─' + '─'.repeat(maxTeamWidth) + '─┼─' + '─'.repeat(maxIdeasWidth) + '─┼─' + '─'.repeat(maxSPWidth) + '─┼─' + '─'.repeat(maxTeamSprintsWidth) + '─┼─' + '─'.repeat(maxPersonSprintsWidth) + '─┤' + colors.reset);
+  console.log(colors.bright + colors.cyan + '┌─' + '─'.repeat(maxTeamWidth) + '─┬─' + '─'.repeat(maxVelocityWidth) + '─┬─' + '─'.repeat(maxIdeasWidth) + '─┬─' + '─'.repeat(maxSPWidth) + '─┬─' + '─'.repeat(maxTeamSprintsWidth) + '─┬─' + '─'.repeat(maxPersonSprintsWidth) + '─┬─' + '─'.repeat(maxPSTargetWidth) + '─┬─' + '─'.repeat(maxBufferWidth) + '─┐' + colors.reset);
+  console.log(colors.bright + colors.cyan + '│ ' + colors.white + pad('Team & Quarter', maxTeamWidth) + colors.cyan + ' │ ' + colors.white + pad('Velocity', maxVelocityWidth) + colors.cyan + ' │ ' + colors.white + pad('Ideas', maxIdeasWidth) + colors.cyan + ' │ ' + colors.white + pad('SP', maxSPWidth) + colors.cyan + ' │ ' + colors.white + pad('Team Sprints', maxTeamSprintsWidth) + colors.cyan + ' │ ' + colors.white + pad('Person Sprints (PS)', maxPersonSprintsWidth) + colors.cyan + ' │ ' + colors.white + pad('PS Target', maxPSTargetWidth) + colors.cyan + ' │ ' + colors.white + pad('Buffer (goal +20%)', maxBufferWidth) + colors.cyan + ' │' + colors.reset);
+  console.log(colors.bright + colors.cyan + '├─' + '─'.repeat(maxTeamWidth) + '─┼─' + '─'.repeat(maxVelocityWidth) + '─┼─' + '─'.repeat(maxIdeasWidth) + '─┼─' + '─'.repeat(maxSPWidth) + '─┼─' + '─'.repeat(maxTeamSprintsWidth) + '─┼─' + '─'.repeat(maxPersonSprintsWidth) + '─┼─' + '─'.repeat(maxPSTargetWidth) + '─┼─' + '─'.repeat(maxBufferWidth) + '─┤' + colors.reset);
 
   // Data rows
   entries.forEach(([teamKey, summary], index) => {
@@ -760,22 +973,65 @@ function displayTeamSummaryTable(teamQuarterSummary) {
     const teamColor = getTeamColor(teamKey);
     const commitmentColor = getCommitmentColor(teamKey);
     const teamSprintColor = getEffortColor(summary.totalEstimatedSprints);
-    const personSprintColor = getEffortColor(summary.totalPersonSprints);
+    
+    // Extract team name and quarter to calculate targets
+    const [teamName, quarterTypeWithParen] = teamKey.split(' (');
+    const quarterType = quarterTypeWithParen.replace(')', '');
+    const teamSize = TEAM_SIZES[teamName] || 0;
+    
+    // Calculate PS Target with PTO adjustment
+    let psTarget = teamSize * 3; // Base calculation: team size * 3 sprints per cycle
+    
+    // Apply PTO adjustment if we have config and PTO data
+    if (config && ptoData.length > 0 && config.teams?.[teamName]) {
+      // Extract quarter from quarterType (e.g., "Q4'25.C1 Committed" -> "Q4'25.C1")
+      const quarterMatch = quarterType.match(/(Q\d'\d+\.C\d+)/);
+      if (quarterMatch) {
+        const quarter = quarterMatch[1];
+        const quarterKey = quarter.toLowerCase().replace(/['']/g, '').replace(/[.]/g, '');
+        
+        if (config.quarters?.[quarterKey]) {
+          const quarterStart = parseDateDDMMYYYY(config.quarters[quarterKey].start);
+          const quarterEnd = parseDateDDMMYYYY(config.quarters[quarterKey].end);
+          const teamMembers = config.teams[teamName];
+          
+          const ptoImpact = calculatePTOImpact(ptoData, teamMembers, quarterStart, quarterEnd);
+          const originalTarget = teamSize * 3;
+          psTarget = teamSize * 3 * (1 - ptoImpact);
+        }
+      }
+    }
+    
+    psTarget = Math.round(psTarget * 100) / 100; // Round to 2 decimal places
+    
+    // Calculate buffer percentage: (psTarget - actualPersonSprints) / psTarget * 100
+    // If committed, use actual person sprints, if roadmap show as comparison
+    const bufferPercent = psTarget > 0 ? ((psTarget - summary.totalPersonSprints) / psTarget * 100) : 0;
+    const bufferText = bufferPercent >= 0 ? `+${bufferPercent.toFixed(0)}%` : `${bufferPercent.toFixed(0)}%`;
+    
+    // Color logic
+    const personSprintColor = getPersonSprintsColor(summary.totalPersonSprints, psTarget);
+    const bufferColor = getBufferColor(bufferPercent);
     
     // Format the team name with colors
-    const [teamName, quarterType] = teamKey.split(' (');
     const formattedTeamName = teamColor + colors.bright + teamName + colors.reset + ' (' + commitmentColor + colors.bright + quarterType.replace(')', '') + colors.reset + ')';
+    
+    const teamVelocity = teamVelocities[teamName] || 'N/A';
+    const velocityDisplay = teamVelocity === 'N/A' ? 'N/A' : Math.round(teamVelocity * 10) / 10; // Round to 1 decimal
     
     console.log(rowBg + colors.cyan + '│ ' + 
                 pad(formattedTeamName, maxTeamWidth) + colors.cyan + ' │ ' +
+                colors.white + colors.bright + pad(velocityDisplay.toString(), maxVelocityWidth) + colors.reset + colors.cyan + ' │ ' +
                 colors.white + colors.bright + pad(summary.ideas.toString(), maxIdeasWidth) + colors.reset + colors.cyan + ' │ ' +
                 colors.white + colors.bright + pad(summary.totalStoryPoints.toString(), maxSPWidth) + colors.reset + colors.cyan + ' │ ' +
                 teamSprintColor + colors.bright + pad(summary.totalEstimatedSprints.toString(), maxTeamSprintsWidth) + colors.reset + colors.cyan + ' │ ' +
-                personSprintColor + colors.bright + pad(summary.totalPersonSprints.toString(), maxPersonSprintsWidth) + colors.reset + colors.cyan + ' │' + colors.reset);
+                personSprintColor + colors.bright + pad(summary.totalPersonSprints.toString(), maxPersonSprintsWidth) + colors.reset + colors.cyan + ' │ ' +
+                colors.white + colors.bright + pad(`${psTarget} PS`, maxPSTargetWidth) + colors.reset + colors.cyan + ' │ ' +
+                bufferColor + colors.bright + pad(bufferText, maxBufferWidth) + colors.reset + colors.cyan + ' │' + colors.reset);
   });
 
   // Footer
-  console.log(colors.bright + colors.cyan + '└─' + '─'.repeat(maxTeamWidth) + '─┴─' + '─'.repeat(maxIdeasWidth) + '─┴─' + '─'.repeat(maxSPWidth) + '─┴─' + '─'.repeat(maxTeamSprintsWidth) + '─┴─' + '─'.repeat(maxPersonSprintsWidth) + '─┘' + colors.reset);
+  console.log(colors.bright + colors.cyan + '└─' + '─'.repeat(maxTeamWidth) + '─┴─' + '─'.repeat(maxVelocityWidth) + '─┴─' + '─'.repeat(maxIdeasWidth) + '─┴─' + '─'.repeat(maxSPWidth) + '─┴─' + '─'.repeat(maxTeamSprintsWidth) + '─┴─' + '─'.repeat(maxPersonSprintsWidth) + '─┴─' + '─'.repeat(maxPSTargetWidth) + '─┴─' + '─'.repeat(maxBufferWidth) + '─┘' + colors.reset);
   
   // Legend
   console.log('');
@@ -789,6 +1045,13 @@ function displayTeamSummaryTable(teamQuarterSummary) {
               colors.green + '●' + colors.reset + colors.dim + ' Low effort  ' +
               colors.yellow + '●' + colors.reset + colors.dim + ' Medium effort  ' +
               colors.red + '●' + colors.reset + colors.dim + ' High effort' + colors.reset);
+  console.log(colors.dim + 'Person Sprints: ' + 
+              colors.green + '●' + colors.reset + colors.dim + ' Within target  ' +
+              colors.red + '●' + colors.reset + colors.dim + ' Over target' + colors.reset);
+  console.log(colors.dim + 'Buffer: ' + 
+              colors.green + '●' + colors.reset + colors.dim + ' 20%+ buffer  ' +
+              '\x1b[33m●' + colors.reset + colors.dim + ' 10-19% buffer  ' +
+              colors.red + '●' + colors.reset + colors.dim + ' <10% buffer' + colors.reset);
 }
 
 // Main execution
@@ -796,6 +1059,9 @@ function displayTeamSummaryTable(teamQuarterSummary) {
   try {
     // Parse command line arguments
     const { ideaIds, quarters, teams } = parseArguments();
+    
+    // Load configuration
+    const config = loadConfig();
     
     // Use provided teams or default to Dashboard and Back Office + Internal Tools
     const targetTeams = teams.length > 0 ? teams : ['Dashboard', 'Back Office + Internal Tools'];
@@ -832,6 +1098,94 @@ function displayTeamSummaryTable(teamQuarterSummary) {
       console.log('4. Get team velocity from scrum boards');
       console.log('5. Estimate effort in sprints (team + person)');
       process.exit(1);
+    }
+    
+    // Fetch PTO data for the quarters being analyzed
+    let ptoData = [];
+    if (config && quarters && quarters.length > 0) {
+      // Get date range for all quarters
+      const quarterDates = quarters.map(q => {
+        // Convert formatted quarter back to config key format
+        // Q4'25.C1 -> q425c1
+        const configKey = q.toLowerCase().replace(/['']/g, '').replace(/[.]/g, '');
+        return config.quarters?.[configKey];
+      }).filter(Boolean);
+      
+      if (quarterDates.length > 0) {
+        const earliestStart = quarterDates.reduce((min, qd) => 
+          new Date(parseDateDDMMYYYY(qd.start)) < new Date(parseDateDDMMYYYY(min.start)) ? qd : min
+        ).start;
+        const latestEnd = quarterDates.reduce((max, qd) => 
+          new Date(parseDateDDMMYYYY(qd.end)) > new Date(parseDateDDMMYYYY(max.end)) ? qd : max
+        ).end;
+        
+        if (config.bamboohr?.subdomain) {
+          ptoData = await fetchTimeOffData(config.bamboohr.subdomain, earliestStart, latestEnd);
+          
+          // Log PTO summary for transparency
+          if (ptoData.length > 0) {
+            console.log(`\n=== PTO SCHEDULE FOR ${earliestStart} TO ${latestEnd} ===`);
+            
+            // Group PTO by team for better readability
+            const ptoByTeam = {};
+            
+            for (const team of targetTeams) {
+              if (config.teams?.[team]) {
+                const teamMembers = config.teams[team];
+                const teamPTO = [];
+                
+                for (const member of teamMembers) {
+                  const memberPTO = ptoData.filter(request => {
+                    const employeeName = request.name || request.employee?.displayName || request.employee?.firstName + ' ' + request.employee?.lastName;
+                    return employeeName === member;
+                  });
+                  
+                  for (const pto of memberPTO) {
+                    const ptoStartDate = new Date(pto.start);
+                    const ptoEndDate = new Date(pto.end);
+                    const quarterStartDate = new Date(parseDateDDMMYYYY(earliestStart));
+                    const quarterEndDate = new Date(parseDateDDMMYYYY(latestEnd));
+                    
+                    // Check if PTO overlaps with quarter
+                    const overlapStart = new Date(Math.max(ptoStartDate.getTime(), quarterStartDate.getTime()));
+                    const overlapEnd = new Date(Math.min(ptoEndDate.getTime(), quarterEndDate.getTime()));
+                    
+                    if (overlapStart <= overlapEnd) {
+                      const workingDays = getWorkingDays(overlapStart, overlapEnd);
+                      teamPTO.push({
+                        member,
+                        start: pto.start,
+                        end: pto.end,
+                        days: workingDays,
+                        type: pto.type?.name || 'Time Off'
+                      });
+                    }
+                  }
+                }
+                
+                if (teamPTO.length > 0) {
+                  ptoByTeam[team] = teamPTO;
+                }
+              }
+            }
+            
+            // Display PTO by team
+            if (Object.keys(ptoByTeam).length > 0) {
+              for (const [team, ptoList] of Object.entries(ptoByTeam)) {
+                console.log(`\n${team} Team:`);
+                ptoList.forEach(pto => {
+                  console.log(`  • ${pto.member}: ${pto.days} working days (${pto.start} to ${pto.end}) - ${pto.type}`);
+                });
+              }
+              console.log('');
+            } else {
+              console.log('No team member PTO found for this period.\n');
+            }
+          } else {
+            console.log('\nNo PTO records found for this period.\n');
+          }
+        }
+      }
     }
     
     const results = await analyzeIdeas(ideaIds, quarters, targetTeams);
@@ -904,7 +1258,7 @@ function displayTeamSummaryTable(teamQuarterSummary) {
     });
     
     console.log('\n=== TEAM SUMMARY ===');
-    displayTeamSummaryTable(teamQuarterSummary);
+    await displayTeamSummaryTable(teamQuarterSummary, config, ptoData);
     
   } catch (error) {
     console.error('[FATAL] Script failed');
