@@ -1,0 +1,44 @@
+teams:
+  Dashboard:
+    - Roman Hartig
+    - Jerguš Kačmár
+    - Teodor Lilov
+    - Daniel Malachovský
+    - Kristina Shatts
+    - Serhii Shevchenko
+
+  "Back Office + Internal Tools":
+    - Nikoleta Menyhártová
+    - Peter Stanko
+    - Anže Šuštar
+    - Matej Zboroň
+
+quarters:
+  q425c1:
+    start: "24-09-2025"
+    end: "04-11-2025"
+  q425c2:
+    start: "05-11-2025"
+    end: "30-12-2025"
+  q126c1:
+    start: "01-01-2026"
+    end: "28-02-2026"
+  q126c2:
+    start: "01-03-2026"
+    end: "30-04-2026"
+  q226c1:
+    start: "01-05-2026"
+    end: "30-06-2026"
+  q226c2:
+    start: "01-07-2026"
+    end: "31-08-2026"
+  q326c1:
+    start: "01-09-2026"
+    end: "31-10-2026"
+  q326c2:
+    start: "01-11-2026"
+    end: "31-12-2026"
+
+# BambooHR configuration
+bamboohr:
+  subdomain: "cloudtalk"  # Replace with your actual BambooHR subdomain
