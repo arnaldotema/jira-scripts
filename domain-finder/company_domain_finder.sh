@@ -131,7 +131,7 @@ search_domain_with_ai() {
             messages: [
                 {
                     role: "user",
-                    content: ("What is the official website domain for the company \"" + $company + "\"? Respond with ONLY the domain name (e.g., example.com) without http://, https://, www., or any additional text. If you are not confident about the domain, respond with UNKNOWN.")
+                    content: ("What is the official website domain for the company \"" + $company + "\"? Respond with ONLY the domain name (e.g., example.com) without http://, https://, www., or any additional text. Make your best educated guess based on the company name. Only respond with UNKNOWN if the company name is clearly invalid (like just a number, empty, or random characters).")
                 }
             ]
         }')
@@ -239,6 +239,8 @@ verify_domain() {
 process_single_company() {
     local company_name="$1"
     local result_file="$2"
+    local output_csv="$3"
+    local original_line="$4"
 
     log_info "Processing: $company_name"
 
@@ -249,6 +251,8 @@ process_single_company() {
     if [ "$domain" = "ERROR" ]; then
         echo "$company_name,ERROR" >> "$result_file"
         log_error "Failed to search domain for: $company_name"
+        # Write to output CSV immediately
+        [ -n "$output_csv" ] && [ -n "$original_line" ] && echo "${original_line},ERROR" >> "$output_csv"
         return 1
     fi
 
@@ -256,9 +260,13 @@ process_single_company() {
     if verify_domain "$domain"; then
         echo "$company_name,$domain" >> "$result_file"
         log_info "✓ Found and verified: $company_name -> $domain"
+        # Write to output CSV immediately
+        [ -n "$output_csv" ] && [ -n "$original_line" ] && echo "${original_line},${domain}" >> "$output_csv"
     else
         echo "$company_name,UNVERIFIED:$domain" >> "$result_file"
         log_info "⚠ Found but not verified: $company_name -> $domain"
+        # Write to output CSV immediately
+        [ -n "$output_csv" ] && [ -n "$original_line" ] && echo "${original_line},UNVERIFIED:${domain}" >> "$output_csv"
     fi
 }
 
@@ -266,15 +274,26 @@ process_batch() {
     local batch_file="$1"
     local result_file="$2"
     local batch_num="$3"
+    local output_csv="$4"
+    local input_csv="$5"
+    local start_line="$6"
 
     log_info "Processing batch $batch_num (up to $BATCH_SIZE companies)..."
 
     local count=0
+    local line_num=$start_line
     while IFS= read -r company_name; do
         [ -z "$company_name" ] && continue
 
         count=$((count + 1))
-        process_single_company "$company_name" "$result_file"
+
+        # Get the original line from input CSV (skip header, line_num is 0-indexed)
+        local original_line
+        original_line=$(sed -n "$((line_num + 2))p" "$input_csv")
+
+        process_single_company "$company_name" "$result_file" "$output_csv" "$original_line"
+
+        line_num=$((line_num + 1))
 
         # Small delay to avoid rate limiting
         sleep 1
@@ -345,9 +364,16 @@ main() {
     total_companies=$(count_csv_rows "$input_csv")
     log_info "Total companies to process: $total_companies"
 
+    # Initialize output CSV with header
+    local header
+    header=$(get_csv_header "$input_csv")
+    echo "${header},domain" > "$output_csv"
+    log_info "Initialized output CSV: $output_csv"
+
     # Process in batches
     local batch_num=0
     local line_count=0
+    local batch_start_line=0
 
     while IFS= read -r company_name; do
         [ -z "$company_name" ] && continue
@@ -356,6 +382,7 @@ main() {
         if [ $((line_count % BATCH_SIZE)) -eq 0 ]; then
             batch_num=$((batch_num + 1))
             local batch_file="$TEMP_DIR/batch_${batch_num}.txt"
+            batch_start_line=$line_count
             : > "$batch_file"
         fi
 
@@ -364,12 +391,12 @@ main() {
 
         # Process batch when full
         if [ $((line_count % BATCH_SIZE)) -eq 0 ] || [ "$line_count" -eq "$total_companies" ]; then
-            process_batch "$batch_file" "$results_file" "$batch_num"
+            process_batch "$batch_file" "$results_file" "$batch_num" "$output_csv" "$input_csv" "$batch_start_line"
         fi
     done < "$companies_file"
 
-    # Merge results into final CSV
-    merge_results_to_csv "$input_csv" "$results_file" "$output_csv"
+    # No need to merge - we've been writing incrementally
+    log_info "Incremental writing complete - all results in: $output_csv"
 
     log_info "Processing complete!"
     log_info "Results saved to: $output_csv"
